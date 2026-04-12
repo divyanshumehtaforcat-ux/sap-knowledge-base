@@ -1,0 +1,71 @@
+name: SAP Knowledge Crawler
+
+on:
+  # Runs automatically every Sunday at 02:00 UTC
+  schedule:
+    - cron: '0 2 * * 0'
+
+  # Lets you run it manually from the GitHub Actions tab at any time
+  # Leave search_query empty for a full weekly crawl
+  # Type a topic in search_query to do an on-demand search (e.g. "IPD BOM sync S4HANA")
+  workflow_dispatch:
+    inputs:
+      search_query:
+        description: 'On-demand search topic (leave empty for full crawl)'
+        required: false
+        default: ''
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300  # 5-hour maximum (SAP crawl can take a while)
+
+    permissions:
+      contents: write  # Needed to commit the Excel file back to the repo
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python libraries
+        run: pip install -r requirements.txt
+
+      # ── Full weekly crawl ──────────────────────────────────────────────────
+      - name: Run full SAP knowledge crawl
+        if: >
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' &&
+           github.event.inputs.search_query == '')
+        env:
+          GEMINI_API_KEY:               ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON:  ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GITHUB_TOKEN:                 ${{ secrets.GITHUB_TOKEN }}
+        run: python crawler.py
+
+      # ── On-demand search ───────────────────────────────────────────────────
+      - name: Run on-demand search
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.search_query != ''
+        env:
+          GEMINI_API_KEY:               ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON:  ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GITHUB_TOKEN:                 ${{ secrets.GITHUB_TOKEN }}
+          SEARCH_QUERY:                 ${{ github.event.inputs.search_query }}
+        run: python search_on_demand.py
+
+      # ── Save results back to repo ──────────────────────────────────────────
+      - name: Commit updated files back to repository
+        run: |
+          git config user.name  "SAP Crawler Bot"
+          git config user.email "bot@sap-crawler.github.com"
+          git add sap_knowledge_base.xlsx progress.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Crawler update $(date -u '+%Y-%m-%d')"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

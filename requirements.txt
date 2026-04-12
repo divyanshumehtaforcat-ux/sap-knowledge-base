@@ -1,0 +1,19 @@
+# SAP IPD Knowledge Crawler — Python Dependencies
+# All tools are free. No paid APIs.
+
+# Web crawling
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.2.1
+
+# Google Sheets integration
+gspread==6.1.2
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+
+# AI summarisation and scoring — Gemini Flash (free tier, 1500 requests/day)
+google-generativeai==0.7.2
+
+# Excel file generation
+openpyxl==3.1.2
