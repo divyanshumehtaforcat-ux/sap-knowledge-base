@@ -233,6 +233,77 @@ SEED_KNOWLEDGE = [
      "while ECC/S4 PLM manages production BOMs and documents. Integration layer bridges both. "
      "Full migration timeline depends on data volume and process complexity.",
      "COMMUNITY", "? ASSUMED"),
+
+    # ── New entries: missing BTP services and RISE patterns ──────────────────────
+
+    ("BTP_Tools", "SAP Build Work Zone — dynamic_dest Reverse Proxy",
+     "https://help.sap.com/docs/build-work-zone-advanced-edition/sap-build-work-zone-advanced-edition/destinations-used-for-routing",
+     "SAP Build Work Zone (BWZ) Advanced Edition includes a dynamic_dest feature that acts as a "
+     "BTP-native authenticated HTTP reverse proxy. It routes browser requests through named BTP "
+     "Destinations to backend systems (including RISE Content Server) without exposing backend URLs. "
+     "The browser authenticates via IAS (SAML/OIDC); BWZ forwards the authenticated request to the "
+     "destination. This is an INFRASTRUCTURE ROUTING capability, not a UI shell feature. "
+     "Requires BWZ Advanced license — not available in BWZ Standard. "
+     "Used for: file download from RISE Content Server, authenticated API proxying, content streaming. "
+     "Pairs with SAP Private Link for RISE Private Cloud connectivity.",
+     "BTP_TOOL", "✓ CONFIRMED"),
+
+    ("BTP_Tools", "SAP Private Link Service — RISE Private Cloud Connectivity",
+     "https://help.sap.com/docs/private-link/private-link1/what-is-sap-private-link-service",
+     "SAP Private Link Service creates a private network endpoint between a BTP subaccount and "
+     "RISE Private Cloud or hyperscaler services (AWS, Azure, GCP). Traffic never traverses the "
+     "public internet. Required for all BTP-to-RISE integrations where RISE systems are not "
+     "internet-reachable. Must be explicitly entitled in BTP global account and assigned to subaccount. "
+     "Distinct from Cloud Connector: Private Link is network-level (RISE only); "
+     "Cloud Connector is software proxy (ECC on-premise and S/4HANA). "
+     "Used with: CAP proxy services, Kyma functions, BWZ dynamic_dest, iFlows targeting RISE.",
+     "BTP_TOOL", "✓ CONFIRMED"),
+
+    ("BTP_Tools", "SAP BTP Kyma Runtime — Serverless Functions and Microservices",
+     "https://help.sap.com/docs/btp/sap-business-technology-platform/kyma-environment",
+     "SAP BTP Kyma Runtime is a Kubernetes-based environment for running serverless functions, "
+     "Docker containers, and microservices on BTP. Preferred over CAP Cloud Foundry for scenarios "
+     "involving binary file streaming (no CF memory limits), webhook processing, and lightweight "
+     "HTTP proxies. Kyma functions can connect to RISE Private Cloud via Private Link. "
+     "Supports Node.js, Python, Go runtimes. "
+     "For IPD projects: use Kyma for document download proxy, event webhook receivers, "
+     "and any scenario requiring low-latency synchronous HTTP without CF constraints.",
+     "BTP_TOOL", "✓ CONFIRMED"),
+
+    ("BTP_Tools", "SAP Launchpad Service — Lightweight Fiori Launchpad on BTP",
+     "https://help.sap.com/docs/launchpad-service",
+     "SAP Launchpad Service provides a Fiori launchpad on BTP for aggregating apps. "
+     "Lighter and lower-cost alternative to SAP Build Work Zone. "
+     "Key difference from BWZ: Launchpad Service does NOT include dynamic_dest proxy capability. "
+     "Use Launchpad Service for simple app tiles and navigation. "
+     "Use BWZ Advanced when authenticated HTTP routing or document proxy is needed. "
+     "Both integrate with IAS for single sign-on.",
+     "BTP_TOOL", "✓ CONFIRMED"),
+
+    ("SAP_IPD", "RISE Private Cloud Content Server — Document Access Patterns",
+     "https://help.sap.com/docs/SAP_S4HANA_CLOUD/private/document-management",
+     "RISE Private Cloud Content Server stores SAP DMS documents. It is not internet-reachable "
+     "by design — all access from BTP or external apps must go through SAP Private Link. "
+     "For IPD document download scenarios: BTP proxy layer (CAP or Kyma) fetches the document "
+     "from Content Server via Private Link and streams it to the browser. "
+     "UUID-based access tokens are used for secure sharing without exposing S-User credentials. "
+     "Do not use Integration Suite iFlows for synchronous browser file download — "
+     "iFlows process messages and do not support streaming binary responses to browsers. "
+     "Content Server URL pattern: https://<host>:<port>/ContentServer/ContentServer.dll",
+     "DIRECT_IPD", "✓ CONFIRMED"),
+
+    ("BTP_Tools", "SAP BTP Entitlements — Service Availability by Contract",
+     "https://help.sap.com/docs/btp/sap-business-technology-platform/entitlements-and-quotas",
+     "BTP services are not automatically available — they require explicit entitlement in the "
+     "global account and assignment to a subaccount. Absence of entitlement means the service "
+     "CANNOT be used even if it is technically the right approach. "
+     "Services that commonly need explicit entitlement for IPD projects: "
+     "SAP Private Link (not default), Kyma Runtime (requires cluster provisioning), "
+     "BWZ Advanced Edition (separate license), Integration Suite (per-message pricing), "
+     "API Management (per-call pricing), SAP Event Mesh (subscription). "
+     "Always confirm entitlements with client's BTP admin before recommending an approach. "
+     "Mark as ~ CONDITIONAL if entitlement status is unknown.",
+     "BTP_TOOL", "✓ CONFIRMED"),
 ]
 
 # GitHub search queries — produces the richest real-world content
