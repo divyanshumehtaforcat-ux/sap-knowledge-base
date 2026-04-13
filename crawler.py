@@ -2,10 +2,10 @@
 SAP Knowledge Crawler
 =====================
 Runs automatically every Sunday on GitHub Actions.
-Crawls all public SAP documentation, community posts, and GitHub repos.
-Saves results to Google Sheets (organised by tab) and Excel.
+Uses SAP's own public search API to get documentation content — no browser needed.
+Crawls: SAP Help API, SAP Community, GitHub repos.
+Saves to Google Sheets (organised by tab) and Excel.
 Uses Gemini Flash (free) for scoring and summarisation.
-No paid APIs. No S-User. Nothing on your laptop.
 """
 
 import os
@@ -24,36 +24,61 @@ from openpyxl import Workbook
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 
-GEMINI_API_KEY           = os.environ["GEMINI_API_KEY"]
-GOOGLE_CREDENTIALS_JSON  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-GITHUB_TOKEN             = os.environ.get("GITHUB_TOKEN", "")
+GEMINI_API_KEY          = os.environ["GEMINI_API_KEY"]
+GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+GITHUB_TOKEN            = os.environ.get("GITHUB_TOKEN", "")
 
 # Your Google Sheet — pre-created and shared with the service account
-# Never changes. Crawler writes into this sheet every week.
 GOOGLE_SHEET_ID = "1eiZ3f1N-YAop3gA7pe3YEqrh2ZuW01RHoxx8ncGmkn4"
 
-RATE_LIMIT       = 2.5   # seconds between every page request (SAP never blocks at this speed)
-RETRY_WAIT       = 60    # seconds to wait when SAP returns a 429 "too many requests" error
-BATCH_SIZE       = 20    # rows written to Google Sheets at once
-SCORE_THRESHOLD  = 4     # pages scoring below this are skipped
-SAVE_INTERVAL    = 20    # save progress.json every N pages
-PROGRESS_FILE    = "progress.json"
-EXCEL_FILE       = "sap_knowledge_base.xlsx"
+RATE_LIMIT      = 2.5   # seconds between requests
+RETRY_WAIT      = 60    # seconds to wait on 429 error
+BATCH_SIZE      = 20    # rows per Sheets write
+SCORE_THRESHOLD = 4     # skip pages scoring below this
+SAVE_INTERVAL   = 20    # save progress every N pages
+PROGRESS_FILE   = "progress.json"
+EXCEL_FILE      = "sap_knowledge_base.xlsx"
 
-# These sources are always crawled — critical for BTP SaaS analogy reasoning
-PRIORITY_SOURCES = [
-    ("SAP_IPD",           "https://help.sap.com/docs/SAP_IPD"),
-    ("SAP_EPD",           "https://help.sap.com/docs/SAP_EPD"),
-    ("SuccessFactors",    "https://help.sap.com/docs/SAP_SUCCESSFACTORS_HXM_SUITE"),
-    ("Ariba",             "https://help.sap.com/docs/ARIBA"),
-    ("SAP_BTP",           "https://help.sap.com/docs/BTP"),
-    ("Integration_Suite", "https://help.sap.com/docs/CLOUD_INTEGRATION"),
-    ("SAP_Build_Apps",    "https://help.sap.com/docs/SAP_BUILD_APPS"),
-    ("SAP_CAP",           "https://help.sap.com/docs/btp/sap-business-application-studio"),
-    ("S4HANA_Cloud",      "https://help.sap.com/docs/SAP_S4HANA_CLOUD"),
-    ("SAP_PLM",           "https://help.sap.com/docs/SAP_PLM"),
-    ("SAP_DMS",           "https://help.sap.com/docs/SAP_DOCUMENT_MANAGEMENT"),
-    ("SAP_MDG",           "https://help.sap.com/docs/SAP_MASTER_DATA_GOVERNANCE"),
+# SAP products to search — these drive ALL content discovery
+SAP_SEARCH_QUERIES = [
+    # Direct IPD/EPD
+    ("SAP_IPD",           "SAP Integrated Product Development IPD"),
+    ("SAP_IPD",           "SAP IPD BTP configuration admin"),
+    ("SAP_IPD",           "SAP IPD API integration extension"),
+    ("SAP_EPD",           "SAP Engineering Product Development EPD"),
+    ("SAP_EPD",           "SAP EPD BOM variant configuration"),
+    # BTP tools (both sides connector)
+    ("BTP_Tools",         "SAP Integration Suite Cloud Integration iFlow"),
+    ("BTP_Tools",         "SAP BTP Extension Suite CAP model"),
+    ("BTP_Tools",         "SAP Build Apps low code extension"),
+    ("BTP_Tools",         "SAP Event Mesh messaging BTP"),
+    ("BTP_Tools",         "SAP API Management BTP"),
+    # BTP SaaS analogy peers
+    ("SuccessFactors",    "SAP SuccessFactors BTP extension side-by-side"),
+    ("SuccessFactors",    "SAP SuccessFactors integration BTP API"),
+    ("Ariba",             "SAP Ariba BTP extension integration"),
+    # Integration landscape — other side
+    ("S4HANA",            "SAP S4HANA RISE private cloud integration BTP"),
+    ("S4HANA",            "SAP S4HANA PLM product lifecycle management"),
+    ("SAP_PLM",           "SAP PLM classic ECC product lifecycle"),
+    ("SAP_PLM",           "SAP PLM migration S4HANA IPD"),
+    ("SAP_DMS",           "SAP DMS document management system integration"),
+    ("SAP_ECTR",          "SAP ECTR Engineering Control Center CAD"),
+    ("SAP_MDG",           "SAP MDG master data governance material"),
+    # Migration
+    ("Migration",         "ECC to S4HANA PLM migration roadmap"),
+    ("Migration",         "SAP PLM to IPD migration transition"),
+]
+
+SAP_COMMUNITY_QUERIES = [
+    "SAP IPD integrated product development",
+    "SAP EPD engineering product development BTP",
+    "SAP PLM S4HANA migration integration",
+    "SAP IPD BOM integration S4HANA",
+    "SAP BTP extension SuccessFactors side-by-side",
+    "SAP Integration Suite PLM iFlow",
+    "SAP IPD API extension customization",
+    "SAP DMS document management IPD",
 ]
 
 SHEET_TABS = [
@@ -77,21 +102,25 @@ SAP_NOTE_RE = re.compile(
     r'\b(?:SAP\s+)?[Nn]ote\s+#?(\d{6,10})\b|KBA\s+#?(\d{6,10})'
 )
 
-# ─── GEMINI SETUP ──────────────────────────────────────────────────────────────
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+# ─── GEMINI ────────────────────────────────────────────────────────────────────
 
 genai.configure(api_key=GEMINI_API_KEY)
 _model = genai.GenerativeModel("gemini-1.5-flash")
 
 
 def gemini_score(text: str, product: str = "SAP") -> float:
-    """Ask Gemini to score page relevance 0–10. Returns 0 on failure."""
     try:
         prompt = (
-            "Score this SAP documentation page 0-10 for relevance to "
-            "SAP PLM, IPD, EPD, BTP extensions, SuccessFactors, Ariba, "
-            "or S/4HANA integration. Return ONLY a single number 0-10.\n\n"
-            f"Product context: {product}\n"
-            f"Content preview:\n{text[:1500]}"
+            "Score this SAP content 0-10 for relevance to SAP PLM, IPD, EPD, "
+            "BTP extensions, SuccessFactors, or S/4HANA integration. "
+            "Return ONLY a single number 0-10, nothing else.\n\n"
+            f"Product: {product}\nContent:\n{text[:1500]}"
         )
         raw = _model.generate_content(prompt).text.strip().split()[0]
         return min(max(float(raw), 0.0), 10.0)
@@ -100,13 +129,12 @@ def gemini_score(text: str, product: str = "SAP") -> float:
 
 
 def gemini_summarise(text: str, product: str, url: str) -> str:
-    """Summarise a page in 3 bullet points. Returns fallback on failure."""
     try:
         prompt = (
-            "Summarise this SAP documentation page in exactly 3 concise bullet points. "
-            "Focus on: what capability is described, how to configure or use it, "
+            "Summarise this SAP content in exactly 3 concise bullet points. "
+            "Focus on: what capability is described, how to configure/use it, "
             "and any integration or extension relevance. Start each bullet with •\n\n"
-            f"Product: {product}\nURL: {url}\n\nContent:\n{text[:3000]}"
+            f"Product: {product}\nURL: {url}\nContent:\n{text[:3000]}"
         )
         return _model.generate_content(prompt).text.strip()
     except Exception:
@@ -114,39 +142,37 @@ def gemini_summarise(text: str, product: str, url: str) -> str:
 
 
 def gemini_github_queries() -> list:
-    """Generate 10 smart GitHub search queries using Gemini."""
     try:
         prompt = (
-            "Generate 10 GitHub search queries to find community-built SAP solutions. "
-            "Cover: SAP IPD, SAP EPD, SAP PLM, BTP extensions, S/4HANA integration, "
-            "SuccessFactors extensions, SAP CAP models, SAP Integration Suite iFlows, "
-            "ECC PLM migration, SAP ABAP BTP. "
-            "Return ONLY the queries, one per line, no numbering, no explanation."
+            "Generate 10 GitHub search queries to find open-source SAP solutions. "
+            "Focus on: SAP IPD, SAP EPD, SAP PLM, BTP extensions, S/4HANA migration, "
+            "SuccessFactors CAP, SAP Integration Suite iFlows, ECC PLM migration tools. "
+            "Return ONLY the queries, one per line."
         )
         lines = _model.generate_content(prompt).text.strip().split("\n")
-        return [l.strip() for l in lines if l.strip()][:10]
+        return [l.strip().lstrip("0123456789.-) ") for l in lines if l.strip()][:10]
     except Exception:
         return [
             "SAP IPD BTP extension",
             "SAP PLM S4HANA integration",
-            "SAP EPD customization BTP",
             "SAP Integration Suite iFlow PLM",
             "SuccessFactors BTP extension CAP",
-            "SAP ABAP BTP adapter",
             "SAP ECC PLM migration S4HANA",
             "SAP CAP model PLM",
-            "SAP API hub PLM connector",
+            "SAP BTP adapter ABAP",
             "SAP DMS document management integration",
+            "SAP MDG master data governance",
+            "SAP EPD engineering product development",
         ]
 
 
-# ─── PROGRESS MANAGER ─────────────────────────────────────────────────────────
+# ─── PROGRESS ─────────────────────────────────────────────────────────────────
 
 def load_progress() -> dict:
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"visited": [], "sheet_id": None, "last_save": None}
+    return {"visited_queries": [], "sheet_id": GOOGLE_SHEET_ID, "last_save": None}
 
 
 def save_progress(progress: dict) -> None:
@@ -154,20 +180,16 @@ def save_progress(progress: dict) -> None:
         json.dump(progress, f, indent=2)
 
 
-# ─── HTTP HELPER ──────────────────────────────────────────────────────────────
+# ─── HTTP ──────────────────────────────────────────────────────────────────────
 
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SAP-Crawler/1.0)"}
-
-
-def safe_get(url: str, headers: dict = None, retries: int = 3):
-    """Fetch a URL with rate limiting and automatic 429 retry."""
+def safe_get(url: str, headers: dict = None, params: dict = None, retries: int = 3):
     time.sleep(RATE_LIMIT)
     h = headers or _HEADERS
     for attempt in range(retries):
         try:
-            resp = requests.get(url, headers=h, timeout=20)
+            resp = requests.get(url, headers=h, params=params, timeout=20)
             if resp.status_code == 429:
-                print(f"    [429] Rate limited — waiting {RETRY_WAIT}s then retrying...")
+                print(f"    [429] Waiting {RETRY_WAIT}s...")
                 time.sleep(RETRY_WAIT)
                 continue
             if resp.status_code == 200:
@@ -175,135 +197,151 @@ def safe_get(url: str, headers: dict = None, retries: int = 3):
             print(f"    [HTTP {resp.status_code}] {url}")
             return None
         except Exception as e:
-            print(f"    [Error attempt {attempt+1}] {url}: {e}")
+            print(f"    [Error {attempt+1}] {e}")
             time.sleep(5)
     return None
 
 
-# ─── PRODUCT DISCOVERY ────────────────────────────────────────────────────────
+# ─── SAP HELP PORTAL API ──────────────────────────────────────────────────────
 
-def discover_sap_products() -> list:
-    """Auto-discover all SAP products from help.sap.com/docs."""
-    print("\n[Discovery] Reading help.sap.com/docs for all SAP products...")
-    products = list(PRIORITY_SOURCES)  # always start with priority sources
-    priority_urls = {p[1] for p in PRIORITY_SOURCES}
+def search_sap_help_api(query: str, max_results: int = 15) -> list:
+    """
+    Use SAP's public help portal search API to get documentation content.
+    This bypasses the JavaScript rendering problem completely.
+    """
+    results = []
 
-    resp = safe_get("https://help.sap.com/docs")
+    # SAP Help Portal search API (public, no auth required)
+    api_url = "https://help.sap.com/api/search"
+    params = {
+        "q": query,
+        "language": "en-US",
+        "state": "PRODUCTION",
+        "type": "TOPIC",
+    }
+    resp = safe_get(api_url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+    }, params=params)
+
     if resp:
-        soup = BeautifulSoup(resp.text, "lxml")
-        seen = set(priority_urls)
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "/docs/" not in href:
-                continue
-            full_url = href if href.startswith("http") else f"https://help.sap.com{href}"
-            if full_url in seen:
-                continue
-            seen.add(full_url)
-            name = a.get_text(strip=True)
-            if name and 2 < len(name) < 100:
-                products.append((name[:80], full_url))
+        try:
+            data = resp.json()
+            items = data.get("data", []) or data.get("hits", []) or []
+            for item in items[:max_results]:
+                title = item.get("title", "") or item.get("shortTitle", "")
+                url   = item.get("link", "") or item.get("url", "") or item.get("path", "")
+                desc  = (item.get("description", "") or
+                         item.get("excerpt", "") or
+                         item.get("body", ""))[:2000]
+                if url and not url.startswith("http"):
+                    url = f"https://help.sap.com{url}"
+                if title and url:
+                    results.append({"title": title, "url": url, "text": desc})
+            print(f"    [SAP API] '{query}' → {len(results)} results")
+            return results
+        except Exception as e:
+            print(f"    [SAP API parse error] {e}")
 
-    print(f"    Found {len(products)} SAP products/sources total")
-    return products
+    # Fallback: DuckDuckGo search scoped to help.sap.com
+    return duckduckgo_search(f"site:help.sap.com {query}", max_results)
 
 
-def discover_subpages(base_url: str, max_pages: int = 40) -> list:
-    """Find sub-pages for a product's documentation hub."""
-    resp = safe_get(base_url)
+def duckduckgo_search(query: str, max_results: int = 10) -> list:
+    """Search DuckDuckGo — free, no API key needed."""
+    print(f"    [DuckDuckGo] {query}")
+    results = []
+    url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+    resp = safe_get(url)
     if not resp:
-        return [base_url]
-
+        return results
     soup = BeautifulSoup(resp.text, "lxml")
-    pages = [base_url]
-    seen = {base_url}
-
-    for a in soup.find_all("a", href=True):
-        if len(pages) >= max_pages:
-            break
-        href = a["href"]
-        if not ("/docs/" in href or "/viewer/" in href):
-            continue
-        full = href if href.startswith("http") else f"https://help.sap.com{href}"
-        if full not in seen and "help.sap.com" in full:
-            seen.add(full)
-            pages.append(full)
-
-    return pages
-
-
-# ─── NOTE REFERENCE EXTRACTOR ─────────────────────────────────────────────────
-
-def extract_note_refs(text: str) -> list:
-    """Extract SAP Note and KBA numbers from page text."""
-    found = []
-    for m in SAP_NOTE_RE.finditer(text):
-        num = m.group(1) or m.group(2)
-        if num:
-            found.append(num)
-    return list(set(found))
+    for item in soup.select(".result")[:max_results]:
+        link    = item.select_one(".result__a")
+        snippet = item.select_one(".result__snippet")
+        if link and link.get("href"):
+            href = link["href"]
+            # DuckDuckGo wraps URLs — extract the actual URL
+            if "uddg=" in href:
+                href = requests.utils.unquote(href.split("uddg=")[-1].split("&")[0])
+            results.append({
+                "title":   link.get_text(strip=True),
+                "url":     href,
+                "text":    snippet.get_text(strip=True) if snippet else "",
+            })
+    return results
 
 
-# ─── EVIDENCE CLASSIFIER ──────────────────────────────────────────────────────
-
-def classify(product: str, url: str) -> tuple:
-    """Return (evidence_type, confidence) for a page."""
-    p, u = product.lower(), url.lower()
-    if any(x in u or x in p for x in ["sap_ipd", "integrated-product-development", "/ipd"]):
-        return "DIRECT_IPD", "✓ CONFIRMED"
-    if any(x in u or x in p for x in ["sap_epd", "engineering-product-development", "/epd"]):
-        return "DIRECT_IPD", "✓ CONFIRMED"
-    if any(x in p for x in ["successfactors", "ariba", "concur", "fieldservice", "fsm"]):
-        return "BTP_ANALOGY", "~ ANALOGY"
-    if any(x in p for x in ["btp", "integration_suite", "integration suite", "build", "cap",
-                             "event mesh", "api management", "extension suite"]):
-        return "BTP_TOOL", "✓ CONFIRMED"
-    if "discovery" in u or "api.sap.com" in u:
-        return "BTP_TOOL", "✓ CONFIRMED"
-    if "community.sap.com" in u:
-        return "COMMUNITY", "? ASSUMED"
-    return "DIRECT", "✓ CONFIRMED"
-
-
-# ─── COMMUNITY CRAWLER ────────────────────────────────────────────────────────
-
-COMMUNITY_URLS = [
-    "https://community.sap.com/t5/product-lifecycle-management/ct-p/product-lifecycle-management",
-    "https://community.sap.com/t5/sap-integrated-product-development/ct-p/integrated-product-development",
-    "https://community.sap.com/t5/sap-btp-blog-posts/ct-p/btp-blog-posts",
-    "https://community.sap.com/t5/enterprise-resource-planning/ct-p/enterprise-resource-planning",
-    "https://community.sap.com/t5/sap-for-high-tech/ct-p/high-tech",
-    "https://community.sap.com/t5/technology-blog-posts/ct-p/technology-blog-posts",
-]
-
+# ─── SAP COMMUNITY ────────────────────────────────────────────────────────────
 
 def crawl_community() -> list:
-    """Crawl SAP Community pages for discussions, answers, and Note references."""
-    print("\n[Community] Crawling SAP Community...")
+    """Search SAP Community for IPD/PLM related discussions and blog posts."""
+    print("\n[Community] Searching SAP Community...")
     results = []
-    for url in COMMUNITY_URLS:
-        resp = safe_get(url)
+    seen = set()
+
+    for query in SAP_COMMUNITY_QUERIES:
+        encoded = requests.utils.quote(query)
+        search_url = f"https://community.sap.com/t5/forums/searchpage/tab/message?q={encoded}&advanced=false&collapse_discussion=true&search_type=thread&solved=false"
+        resp = safe_get(search_url)
         if not resp:
             continue
+
         soup = BeautifulSoup(resp.text, "lxml")
-        text = soup.get_text(separator=" ", strip=True)
-        notes = extract_note_refs(text)
-        score = gemini_score(text, "SAP Community")
-        if score < SCORE_THRESHOLD:
-            continue
-        title = soup.title.get_text(strip=True) if soup.title else url
-        summary = gemini_summarise(text, "Community", url)
-        results.append(_row("Community", title, url, summary, score,
-                            "COMMUNITY", "? ASSUMED", notes))
-        print(f"    [OK] {title[:70]} | Score: {score:.1f} | Notes: {notes or 'none'}")
+        # Extract search result links from community
+        for a in soup.select("a.page-link, a.lia-link-navigation, h2 a, .search-results a")[:8]:
+            href = a.get("href", "")
+            title = a.get_text(strip=True)
+            if not href or not title or len(title) < 10:
+                continue
+            if not href.startswith("http"):
+                href = f"https://community.sap.com{href}"
+            if href in seen or "community.sap.com" not in href:
+                continue
+            seen.add(href)
+
+            # Fetch the actual discussion page
+            page_resp = safe_get(href)
+            if not page_resp:
+                continue
+            page_soup = BeautifulSoup(page_resp.text, "lxml")
+            text = page_soup.get_text(separator=" ", strip=True)[:3000]
+            notes = extract_note_refs(text)
+            score = gemini_score(text, "SAP Community")
+            if score < SCORE_THRESHOLD:
+                continue
+            summary = gemini_summarise(text, "Community", href)
+            results.append(_row("Community", title[:200], href, summary,
+                                score, "COMMUNITY", "? ASSUMED", notes))
+            print(f"    [Community OK] {title[:60]} | Score: {score:.1f}")
+
+    # Also search DuckDuckGo for SAP community posts
+    for query in ["SAP IPD integrated product development community.sap.com",
+                  "SAP IPD BTP extension site:community.sap.com",
+                  "SAP PLM IPD migration site:community.sap.com"]:
+        for r in duckduckgo_search(query, max_results=5):
+            if r["url"] in seen:
+                continue
+            seen.add(r["url"])
+            combined = f"{r['title']}\n{r['text']}"
+            score = gemini_score(combined, "SAP Community")
+            if score < SCORE_THRESHOLD:
+                continue
+            summary = gemini_summarise(combined, "Community", r["url"])
+            notes = extract_note_refs(combined)
+            results.append(_row("Community", r["title"][:200], r["url"], summary,
+                                score, "COMMUNITY", "? ASSUMED", notes))
+            print(f"    [DDG Community] {r['title'][:60]} | Score: {score:.1f}")
+
+    print(f"[Community] Total: {len(results)} relevant posts")
     return results
 
 
 # ─── GITHUB SEARCH ────────────────────────────────────────────────────────────
 
 def search_github() -> list:
-    """Search GitHub for community SAP solutions using Gemini-generated queries."""
-    print("\n[GitHub] Searching for community SAP solutions...")
+    """Search GitHub for community SAP solutions."""
+    print("\n[GitHub] Searching for SAP solutions...")
     results = []
     queries = gemini_github_queries()
     headers = {
@@ -314,112 +352,147 @@ def search_github() -> list:
 
     for query in queries:
         time.sleep(2)
-        api_url = (
-            f"https://api.github.com/search/repositories"
-            f"?q={requests.utils.quote(query)}&sort=stars&per_page=5"
-        )
         try:
-            resp = requests.get(api_url, headers=headers, timeout=15)
+            resp = requests.get(
+                "https://api.github.com/search/repositories",
+                params={"q": query, "sort": "stars", "per_page": 5},
+                headers=headers, timeout=15
+            )
         except Exception:
             continue
         if resp.status_code != 200:
             continue
 
         for repo in resp.json().get("items", []):
-            repo_url = repo["html_url"]
-            if repo_url in seen:
+            url = repo["html_url"]
+            if url in seen:
                 continue
-            seen.add(repo_url)
+            seen.add(url)
 
-            # Try to get README
-            readme_text = ""
+            readme = ""
             readme_resp = safe_get(
                 f"https://api.github.com/repos/{repo['full_name']}/readme",
-                headers=headers,
+                headers=headers
             )
             if readme_resp:
                 try:
-                    data = readme_resp.json()
-                    readme_text = base64.b64decode(
-                        data.get("content", "")
+                    readme = base64.b64decode(
+                        readme_resp.json().get("content", "")
                     ).decode("utf-8", errors="ignore")[:3000]
                 except Exception:
                     pass
 
-            combined = f"{repo['name']}\n{repo.get('description','')}\n{readme_text}"
+            combined = f"{repo['name']}\n{repo.get('description','')}\n{readme}"
             score = gemini_score(combined, "GitHub SAP")
             if score < SCORE_THRESHOLD:
                 continue
-            summary = gemini_summarise(combined, "GitHub", repo_url)
-            results.append(_row("GitHub", repo["full_name"], repo_url, summary,
+            summary = gemini_summarise(combined, "GitHub", url)
+            results.append(_row("GitHub", repo["full_name"], url, summary,
                                 score, "GITHUB", "? ASSUMED", []))
-            print(f"    [OK] {repo['full_name']} | Score: {score:.1f}")
+            print(f"    [GitHub OK] {repo['full_name']} | Score: {score:.1f}")
 
     return results
 
 
-# ─── MAIN PRODUCT CRAWLER ─────────────────────────────────────────────────────
+# ─── MAIN CRAWL LOOP ──────────────────────────────────────────────────────────
 
-def crawl_all_products(products, visited, progress, sheets) -> set:
-    """Crawl all discovered SAP product documentation pages."""
+def crawl_sap_documentation(visited_queries: set, progress: dict, sheets: dict) -> set:
+    """
+    Use SAP Help API + DuckDuckGo to gather documentation for every search query.
+    Each query maps to a product/topic. Results are scored and written to Sheets.
+    """
     buffer = []
-    pages_since_save = 0
+    queries_done = 0
 
-    for product_name, base_url in products:
-        print(f"\n[Product] {product_name}")
-        subpages = discover_subpages(base_url)
+    for product, query in SAP_SEARCH_QUERIES:
+        if query in visited_queries:
+            print(f"  [Skip] Already done: {query}")
+            continue
 
-        for page_url in subpages:
-            if page_url in visited:
+        print(f"\n[SAP Docs] {product}: {query}")
+        results = search_sap_help_api(query, max_results=15)
+
+        for r in results:
+            text = r["text"]
+            if len(text) < 50:
                 continue
-
-            resp = safe_get(page_url)
-            visited.add(page_url)
-            pages_since_save += 1
-
-            if not resp:
-                continue
-
-            soup = BeautifulSoup(resp.text, "lxml")
-            text = soup.get_text(separator=" ", strip=True)
-            if len(text) < 150:
-                continue
-
-            score = gemini_score(text, product_name)
+            score = gemini_score(text, product)
             if score < SCORE_THRESHOLD:
-                print(f"    [Skip] Score {score:.1f} | {page_url}")
+                print(f"    [Skip] Score {score:.1f}: {r['title'][:60]}")
                 continue
 
-            title = (soup.title.get_text(strip=True) if soup.title else page_url)[:200]
-            summary = gemini_summarise(text, product_name, page_url)
             notes = extract_note_refs(text)
-            ev_type, confidence = classify(product_name, page_url)
-
-            buffer.append(_row(product_name, title, page_url, summary,
+            ev_type, confidence = classify(product, r["url"])
+            summary = gemini_summarise(text, product, r["url"])
+            buffer.append(_row(product, r["title"], r["url"], summary,
                                score, ev_type, confidence, notes))
-            print(f"    [OK] {title[:65]} | {score:.1f} | {ev_type}")
+            print(f"    [OK] {r['title'][:65]} | Score: {score:.1f} | {ev_type}")
 
-            if len(buffer) >= BATCH_SIZE:
-                flush(buffer, sheets)
-                buffer = []
+        visited_queries.add(query)
+        queries_done += 1
 
-            if pages_since_save >= SAVE_INTERVAL:
-                progress["visited"] = list(visited)
-                progress["last_save"] = datetime.now().isoformat()
-                save_progress(progress)
-                pages_since_save = 0
-                print(f"    [Saved] {len(visited)} URLs visited so far")
+        if len(buffer) >= BATCH_SIZE:
+            flush(buffer, sheets)
+            buffer = []
+
+        if queries_done % SAVE_INTERVAL == 0:
+            progress["visited_queries"] = list(visited_queries)
+            progress["last_save"] = datetime.now().isoformat()
+            save_progress(progress)
+            print(f"  [Progress saved] {queries_done} queries done")
 
     if buffer:
         flush(buffer, sheets)
 
-    return visited
+    return visited_queries
+
+
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+def extract_note_refs(text: str) -> list:
+    found = []
+    for m in SAP_NOTE_RE.finditer(text):
+        num = m.group(1) or m.group(2)
+        if num:
+            found.append(num)
+    return list(set(found))
+
+
+def classify(product: str, url: str) -> tuple:
+    p, u = product.lower(), url.lower()
+    if any(x in u or x in p for x in ["sap_ipd", "ipd", "integrated-product"]):
+        return "DIRECT_IPD", "✓ CONFIRMED"
+    if any(x in u or x in p for x in ["sap_epd", "epd", "engineering-product"]):
+        return "DIRECT_IPD", "✓ CONFIRMED"
+    if any(x in p for x in ["successfactors", "ariba", "concur", "fsm"]):
+        return "BTP_ANALOGY", "~ ANALOGY"
+    if any(x in p for x in ["btp", "btp_tools", "integration_suite", "build",
+                             "cap", "event", "api management"]):
+        return "BTP_TOOL", "✓ CONFIRMED"
+    if "community.sap.com" in u:
+        return "COMMUNITY", "? ASSUMED"
+    if "github.com" in u:
+        return "GITHUB", "? ASSUMED"
+    return "DIRECT", "✓ CONFIRMED"
+
+
+def _row(product, title, url, summary, score, ev_type, confidence, notes) -> dict:
+    return {
+        "product":    product,
+        "title":      str(title)[:200],
+        "url":        str(url),
+        "summary":    str(summary),
+        "score":      round(float(score), 1),
+        "evidence_type": ev_type,
+        "confidence": confidence,
+        "referenced_notes": ", ".join(notes) if notes else "",
+        "date":       datetime.now().strftime("%Y-%m-%d"),
+    }
 
 
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
 
 def init_sheets(progress):
-    """Authenticate with Google and open the pre-shared knowledge base Sheet."""
     import json as _json
     creds_dict = _json.loads(GOOGLE_CREDENTIALS_JSON)
     scopes = [
@@ -429,12 +502,10 @@ def init_sheets(progress):
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     gc = gspread.authorize(creds)
 
-    # Always use the fixed Sheet ID — no creation needed, no Drive quota issues
     ss = gc.open_by_key(GOOGLE_SHEET_ID)
     progress["sheet_id"] = GOOGLE_SHEET_ID
-    print(f"[Sheets] Opened sheet: {ss.title}")
+    print(f"[Sheets] Opened: {ss.title}")
 
-    # Ensure all tabs exist with headers
     existing = {ws.title: ws for ws in ss.worksheets()}
     sheets = {}
     for tab in SHEET_TABS:
@@ -450,39 +521,26 @@ def init_sheets(progress):
 
 
 def _route_tab(ev_type: str, product: str) -> str:
-    """Map evidence type + product to the correct Sheet tab."""
     p = product.lower()
-    if "epd" in p or ev_type == "DIRECT_IPD" and "epd" in p:
+    if "epd" in p:
         return "SAP_EPD_Direct"
-    if ev_type == "DIRECT_IPD":
+    if ev_type == "DIRECT_IPD" or "ipd" in p:
         return "SAP_IPD_Direct"
     if ev_type == "BTP_ANALOGY":
         return "BTP_Analogy"
-    if ev_type == "BTP_TOOL":
+    if ev_type == "BTP_TOOL" or "btp" in p:
         return "BTP_Tools"
-    if ev_type == "COMMUNITY":
+    if ev_type == "COMMUNITY" or "community" in p:
         return "Community_Discussions"
-    if ev_type == "GITHUB":
+    if ev_type == "GITHUB" or "github" in p:
         return "GitHub_Community"
+    # Route by product name
+    if any(x in p for x in ["s4hana", "plm", "dms", "ectr", "mdg", "migration"]):
+        return "SAP_IPD_Direct"
     return "SAP_IPD_Direct"
 
 
-def _row(product, title, url, summary, score, ev_type, confidence, notes) -> dict:
-    return {
-        "product": product,
-        "title": title[:200],
-        "url": url,
-        "summary": summary,
-        "score": round(float(score), 1),
-        "evidence_type": ev_type,
-        "confidence": confidence,
-        "referenced_notes": ", ".join(notes) if notes else "",
-        "date": datetime.now().strftime("%Y-%m-%d"),
-    }
-
-
 def flush(results: list, sheets: dict) -> None:
-    """Write a batch of results to the appropriate Sheet tabs."""
     groups = {}
     for r in results:
         tab = _route_tab(r["evidence_type"], r["product"])
@@ -498,18 +556,17 @@ def flush(results: list, sheets: dict) -> None:
             r["referenced_notes"], r["date"],
         ] for r in rows]
         ws.append_rows(batch, value_input_option="RAW")
-        print(f"    [Sheets] Wrote {len(batch)} rows → {tab}")
+        print(f"    [Sheets] {len(batch)} rows → {tab}")
 
 
-# ─── EXCEL EXPORT ─────────────────────────────────────────────────────────────
+# ─── EXCEL ────────────────────────────────────────────────────────────────────
 
 def export_excel(ss) -> None:
-    """Mirror all Sheet tabs into an Excel file."""
     wb = Workbook()
     wb.remove(wb.active)
     for ws in ss.worksheets():
         if ws.title == "SAP_Notes":
-            continue  # Notes are added locally via notes_lookup.py only
+            continue
         data = ws.get_all_values()
         if not data:
             continue
@@ -528,43 +585,37 @@ def main():
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 65)
 
-    # Load previous progress (resume support)
     progress = load_progress()
-    visited = set(progress.get("visited", []))
-    print(f"Resuming from {len(visited)} previously visited URLs")
+    visited_queries = set(progress.get("visited_queries", []))
+    print(f"Resuming — {len(visited_queries)} queries already done")
 
-    # Connect to Google Sheets
     gc, ss, sheets = init_sheets(progress)
 
-    # 1 — Discover all SAP products
-    products = discover_sap_products()
+    # 1 — SAP documentation via Help API + DuckDuckGo
+    visited_queries = crawl_sap_documentation(visited_queries, progress, sheets)
 
-    # 2 — Crawl all product documentation
-    visited = crawl_all_products(products, visited, progress, sheets)
-
-    # 3 — Crawl SAP Community
+    # 2 — SAP Community discussions
     community = crawl_community()
     if community:
         flush(community, sheets)
 
-    # 4 — Search GitHub
+    # 3 — GitHub community solutions
     github = search_github()
     if github:
         flush(github, sheets)
 
-    # 5 — Final progress save
-    progress["visited"] = list(visited)
+    # 4 — Save final progress
+    progress["visited_queries"] = list(visited_queries)
     progress["last_save"] = datetime.now().isoformat()
     save_progress(progress)
 
-    # 6 — Export Excel
+    # 5 — Export Excel
     export_excel(ss)
 
     print("\n" + "=" * 65)
     print("Crawl complete!")
-    print(f"Total URLs visited : {len(visited)}")
-    print(f"Google Sheet       : https://docs.google.com/spreadsheets/d/{progress['sheet_id']}")
-    print(f"Excel file         : {EXCEL_FILE}")
+    print(f"Google Sheet : https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}")
+    print(f"Excel file   : {EXCEL_FILE}")
     print("=" * 65)
 
 
