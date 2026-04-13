@@ -38,5 +38,9 @@
     "SAP Integrated Product Development IPD",
     "SAP ECTR Engineering Control Center CAD",
     "SAP SuccessFactors BTP extension side-by-side"
-  ]
+  ],
+  "done_seeds": false,
+  "done_github": false,
+  "done_rss": false,
+  "done_apihub": false
 }
