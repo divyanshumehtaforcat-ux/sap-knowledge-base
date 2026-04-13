@@ -270,28 +270,36 @@ genai.configure(api_key=GEMINI_API_KEY)
 _model = genai.GenerativeModel("gemini-2.0-flash")
 
 
-def gemini_score(text: str, product: str = "SAP") -> float:
+def gemini_score_and_summarise(text: str, product: str, url: str) -> tuple:
+    """
+    Single Gemini call that returns (score, summary).
+    Replaces separate gemini_score() + gemini_summarise() calls — halves quota usage.
+    """
     try:
         prompt = (
-            "Score this SAP content 0-10 for relevance to SAP PLM, IPD, EPD, "
-            "BTP extensions, or S/4HANA integration. Return ONLY a number.\n\n"
-            f"Product: {product}\nContent:\n{text[:1500]}"
+            "You are an SAP knowledge base assistant. Analyse this content.\n\n"
+            "Line 1: score 0-10 for relevance to SAP PLM, IPD, EPD, BTP, S/4HANA integration.\n"
+            "Then write exactly 3 bullet points starting with • covering:\n"
+            "  1. What capability this is\n"
+            "  2. How to configure or use it (be specific: T-codes, IMG paths, API names)\n"
+            "  3. Integration relevance to SAP IPD / BTP / S4HANA\n\n"
+            "Format EXACTLY:\n"
+            "SCORE: <number>\n"
+            "• <bullet 1>\n"
+            "• <bullet 2>\n"
+            "• <bullet 3>\n\n"
+            f"Product: {product}\nURL: {url}\nContent:\n{text[:2500]}"
         )
-        return min(max(float(_model.generate_content(prompt).text.strip().split()[0]), 0.0), 10.0)
+        raw = _model.generate_content(prompt).text.strip()
+        lines = [l for l in raw.split("\n") if l.strip()]
+        # Parse score from first line
+        score_match = re.search(r"[\d.]+", lines[0]) if lines else None
+        score = min(max(float(score_match.group()), 0.0), 10.0) if score_match else 0.0
+        # Everything after first line is the summary
+        summary = "\n".join(lines[1:]).strip() or "• Summary unavailable"
+        return score, summary
     except Exception:
-        return 0.0
-
-
-def gemini_summarise(text: str, product: str, url: str) -> str:
-    try:
-        prompt = (
-            "Summarise in exactly 3 bullet points starting with •. "
-            "Cover: what capability, how to use/configure it, integration relevance.\n\n"
-            f"Product: {product}\nURL: {url}\nContent:\n{text[:3000]}"
-        )
-        return _model.generate_content(prompt).text.strip()
-    except Exception:
-        return "• Summary unavailable"
+        return 0.0, "• Summary unavailable"
 
 
 def keyword_relevant(text: str) -> bool:
@@ -358,15 +366,23 @@ def safe_get(url: str, headers: dict = None, params: dict = None, retries: int =
 def load_seed_knowledge() -> list:
     """
     Load hardcoded known SAP IPD/PLM documentation entries.
-    These are verified official SAP sources — gives the brain immediate knowledge.
+    Uses descriptions directly — ZERO Gemini calls. Preserves quota for
+    GitHub/RSS/API sources and for the user's manual_inject.py.
     """
-    print("\n[Seed] Loading known SAP IPD/PLM knowledge entries...")
+    print("\n[Seed] Loading known SAP IPD/PLM knowledge entries (no Gemini needed)...")
     results = []
     for product, title, url, description, ev_type, confidence in SEED_KNOWLEDGE:
-        summary = gemini_summarise(description, product, url)
-        results.append(_row(product, title, url, summary, 8.0, ev_type, confidence, []))
+        # Format description as bullet points without calling Gemini
+        sentences = [s.strip() for s in description.replace(". ", ".\n").split("\n") if s.strip()]
+        if len(sentences) >= 3:
+            summary = f"• {sentences[0]}\n• {sentences[1]}\n• {' '.join(sentences[2:])}"
+        elif len(sentences) == 2:
+            summary = f"• {sentences[0]}\n• {sentences[1]}"
+        else:
+            summary = f"• {description}"
+        results.append(_row(product, title, url, summary, 8.5, ev_type, confidence, []))
         print(f"  [Seed OK] {title[:70]}")
-    print(f"[Seed] Loaded {len(results)} entries")
+    print(f"[Seed] Loaded {len(results)} entries — 0 Gemini calls used")
     return results
 
 
@@ -448,12 +464,11 @@ def _process_github_repo(repo: dict, headers: dict):
     if not keyword_relevant(combined):
         return None
 
-    score = gemini_score(combined, "GitHub SAP")
+    score, summary = gemini_score_and_summarise(combined, "GitHub SAP", repo["html_url"])
     if score < SCORE_THRESHOLD:
         print(f"    [GitHub Skip] {repo['full_name']} Score:{score:.1f}")
         return None
 
-    summary = gemini_summarise(combined, "GitHub", repo["html_url"])
     notes = extract_note_refs(combined)
     print(f"    [GitHub OK] {repo['full_name']} | Score:{score:.1f}")
     return _row("GitHub", repo["full_name"], repo["html_url"],
@@ -498,17 +513,16 @@ def crawl_community_rss() -> list:
 
                 # Clean HTML from description
                 try:
-                    desc_text = BeautifulSoup(desc, "lxml").get_text(separator=" ", strip=True)[:2000]
+                    desc_text = BeautifulSoup(desc, "html.parser").get_text(separator=" ", strip=True)[:2000]
                 except Exception:
                     desc_text = desc[:2000]
 
                 combined = f"{title}\n{desc_text}"
-                score = gemini_score(combined, "SAP Community")
+                score, summary = gemini_score_and_summarise(combined, "SAP Community", link)
                 if score < SCORE_THRESHOLD:
                     continue
 
-                summary  = gemini_summarise(combined, "Community", link)
-                notes    = extract_note_refs(combined)
+                notes = extract_note_refs(combined)
                 results.append(_row("Community", title[:200], link, summary,
                                     score, "COMMUNITY", "? ASSUMED", notes))
                 print(f"    [RSS OK] {title[:70]} | Score:{score:.1f}")
@@ -566,11 +580,10 @@ def crawl_sap_api_hub() -> list:
                 if not keyword_relevant(combined):
                     continue
 
-                score   = gemini_score(combined, label)
+                score, summary = gemini_score_and_summarise(combined, label, url_)
                 if score < SCORE_THRESHOLD:
                     continue
 
-                summary = gemini_summarise(combined, label, url_)
                 ev_type, confidence = classify(label, url_)
                 results.append(_row(label, name[:200], url_, summary,
                                     score, ev_type, confidence, []))
