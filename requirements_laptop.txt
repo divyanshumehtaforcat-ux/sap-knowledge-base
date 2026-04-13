@@ -9,7 +9,7 @@
 # Web crawling + JavaScript page rendering (SAP Help Portal)
 requests==2.31.0
 beautifulsoup4==4.12.3
-lxml==5.2.1
+# lxml removed — Python 3.14 has no Windows wheel yet, using built-in html.parser instead
 playwright>=1.40.0
 
 # Google Sheets
@@ -18,8 +18,9 @@ google-auth==2.29.0
 google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
 
-# AI summarisation — Gemini Flash (free tier)
-google-generativeai==0.7.2
+# AI summarisation — Gemini Flash called directly via REST API (no SDK needed on laptop)
+# google-generativeai SDK is NOT used here — it has protobuf issues on Python 3.14
+# The script calls https://generativelanguage.googleapis.com directly using requests
 
 # Excel export
 openpyxl==3.1.2

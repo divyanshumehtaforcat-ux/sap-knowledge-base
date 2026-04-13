@@ -56,7 +56,8 @@ import requests
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
-import google.generativeai as genai
+# NOTE: google-generativeai SDK is NOT imported — we call the Gemini REST API
+# directly via requests. This avoids the protobuf/Python 3.14 incompatibility.
 
 # ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
@@ -112,17 +113,40 @@ CONFIDENCE_OPTIONS = [
 
 # ─── SETUP ────────────────────────────────────────────────────────────────────
 
-def setup_gemini():
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "gemini-1.5-flash:generateContent?key={key}"
+)
+
+def setup_gemini() -> str:
+    """Returns the API key — we call Gemini via REST, no SDK needed."""
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         print("\nGemini API key not found in environment variables.")
         api_key = getpass.getpass("Enter your Gemini API key (hidden, not saved): ").strip()
     if not api_key:
         sys.exit("Error: Gemini API key is required.")
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    print("[Gemini] Connected (gemini-1.5-flash)")
-    return model
+    # Quick connection test
+    try:
+        test = _gemini_call(api_key, "Reply with exactly: OK")
+        if "OK" in test:
+            print("[Gemini] Connected (gemini-1.5-flash via REST API)")
+        else:
+            print(f"[Gemini] Connected (response: {test[:30]})")
+    except Exception as e:
+        sys.exit(f"[Gemini] Connection failed: {e}\nCheck your API key.")
+    return api_key
+
+
+def _gemini_call(api_key: str, prompt: str) -> str:
+    """Direct REST call to Gemini Flash — no SDK, no protobuf issues."""
+    resp = requests.post(
+        GEMINI_URL.format(key=api_key),
+        json={"contents": [{"parts": [{"text": prompt}]}]},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
 def setup_sheets():
@@ -269,7 +293,7 @@ def _fetch_requests(url: str):
     try:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
 
         # Remove noise
         for tag in soup(["script", "style", "nav", "footer", "header", "aside",
@@ -341,7 +365,7 @@ def paste_text_input():
 
 # ─── GEMINI SUMMARISATION ─────────────────────────────────────────────────────
 
-def gemini_summarise(model, text: str, product: str, url: str) -> str:
+def gemini_summarise(api_key: str, text: str, product: str, url: str) -> str:
     """
     Rich summarisation designed to extract config-level detail.
     5 bullets with specific values — not generic descriptions.
@@ -373,8 +397,7 @@ Source: {url}
 Content to summarise:
 {text[:9000]}
 """
-        result = model.generate_content(prompt).text.strip()
-        return result
+        return _gemini_call(api_key, prompt)
 
     except Exception as e:
         return f"• Summarisation error: {e}\n• Raw content stored — please review manually."
@@ -473,8 +496,8 @@ def main():
         print("\n[✓] Playwright available — SAP Help Portal pages will render correctly.")
 
     print("\nConnecting to Gemini and Google Sheets...")
-    model = setup_gemini()
-    ss    = setup_sheets()
+    api_key = setup_gemini()
+    ss      = setup_sheets()
     print("\nReady. Let's inject some knowledge.\n")
 
     while True:
@@ -547,7 +570,7 @@ def main():
         confidence, conf_desc = CONFIDENCE_OPTIONS[conf_idx]
 
         # ── Summarise with Gemini ──────────────────────────────────────────────
-        summary = gemini_summarise(model, content, prod_key, url)
+        summary = gemini_summarise(api_key, content, prod_key, url)
 
         # ── Extract SAP Note references ────────────────────────────────────────
         notes = extract_note_refs(content + " " + title + " " + summary)
