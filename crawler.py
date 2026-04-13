@@ -27,6 +27,7 @@ from openpyxl import Workbook
 GEMINI_API_KEY           = os.environ["GEMINI_API_KEY"]
 GOOGLE_CREDENTIALS_JSON  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 GITHUB_TOKEN             = os.environ.get("GITHUB_TOKEN", "")
+DRIVE_FOLDER_ID          = "1YxH9VRbbKR3t1Ci4C7RhZ28T4vKDCppo"  # Your Google Drive folder
 
 RATE_LIMIT       = 2.5   # seconds between every page request (SAP never blocks at this speed)
 RETRY_WAIT       = 60    # seconds to wait when SAP returns a 429 "too many requests" error
@@ -449,11 +450,13 @@ def init_sheets(progress):
 
 
 def _create_sheet(gc, progress):
-    ss = gc.create(f"SAP Knowledge Base {datetime.now().strftime('%Y-%m-%d')}")
+    ss = gc.create(
+        f"SAP Knowledge Base {datetime.now().strftime('%Y-%m-%d')}",
+        folder_id=DRIVE_FOLDER_ID,
+    )
     progress["sheet_id"] = ss.id
     save_progress(progress)
     print(f"[Sheets] Created new sheet: {ss.title} (ID: {ss.id})")
-    # Remove default empty sheet after tabs are created
     return ss
 
 
