@@ -30,6 +30,7 @@ GEMINI_API_KEY          = os.environ["GEMINI_API_KEY"]
 GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 GITHUB_TOKEN            = os.environ.get("GITHUB_TOKEN", "")
 PROGRESS_FILE           = "progress.json"
+GOOGLE_SHEET_ID         = "1eiZ3f1N-YAop3gA7pe3YEqrh2ZuW01RHoxx8ncGmkn4"
 
 genai.configure(api_key=GEMINI_API_KEY)
 _model = genai.GenerativeModel("gemini-1.5-flash")
@@ -140,7 +141,7 @@ def github_search(query: str) -> list:
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
 
 def load_on_demand_tab():
-    """Open the On_Demand_Search tab in the existing Google Sheet."""
+    """Open the On_Demand_Search tab in the fixed Google Sheet."""
     import json as _json
 
     creds_dict = _json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -151,19 +152,7 @@ def load_on_demand_tab():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     gc = gspread.authorize(creds)
 
-    if not os.path.exists(PROGRESS_FILE):
-        print("progress.json not found — run crawler.py first to create the Google Sheet")
-        sys.exit(1)
-
-    with open(PROGRESS_FILE, encoding="utf-8") as f:
-        progress = json.load(f)
-
-    sheet_id = progress.get("sheet_id")
-    if not sheet_id:
-        print("No sheet ID in progress.json — run crawler.py first")
-        sys.exit(1)
-
-    ss = gc.open_by_key(sheet_id)
+    ss = gc.open_by_key(GOOGLE_SHEET_ID)
     try:
         ws = ss.worksheet("On_Demand_Search")
     except Exception:

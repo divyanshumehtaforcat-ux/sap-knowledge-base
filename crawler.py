@@ -27,7 +27,10 @@ from openpyxl import Workbook
 GEMINI_API_KEY           = os.environ["GEMINI_API_KEY"]
 GOOGLE_CREDENTIALS_JSON  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 GITHUB_TOKEN             = os.environ.get("GITHUB_TOKEN", "")
-DRIVE_FOLDER_ID          = "1YxH9VRbbKR3t1Ci4C7RhZ28T4vKDCppo"  # Your Google Drive folder
+
+# Your Google Sheet — pre-created and shared with the service account
+# Never changes. Crawler writes into this sheet every week.
+GOOGLE_SHEET_ID = "1eiZ3f1N-YAop3gA7pe3YEqrh2ZuW01RHoxx8ncGmkn4"
 
 RATE_LIMIT       = 2.5   # seconds between every page request (SAP never blocks at this speed)
 RETRY_WAIT       = 60    # seconds to wait when SAP returns a 429 "too many requests" error
@@ -416,7 +419,7 @@ def crawl_all_products(products, visited, progress, sheets) -> set:
 # ─── GOOGLE SHEETS ────────────────────────────────────────────────────────────
 
 def init_sheets(progress):
-    """Authenticate with Google and open (or create) the knowledge base Sheet."""
+    """Authenticate with Google and open the pre-shared knowledge base Sheet."""
     import json as _json
     creds_dict = _json.loads(GOOGLE_CREDENTIALS_JSON)
     scopes = [
@@ -426,14 +429,10 @@ def init_sheets(progress):
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     gc = gspread.authorize(creds)
 
-    if progress.get("sheet_id"):
-        try:
-            ss = gc.open_by_key(progress["sheet_id"])
-            print(f"[Sheets] Opened existing sheet: {ss.title}")
-        except Exception:
-            ss = _create_sheet(gc, progress)
-    else:
-        ss = _create_sheet(gc, progress)
+    # Always use the fixed Sheet ID — no creation needed, no Drive quota issues
+    ss = gc.open_by_key(GOOGLE_SHEET_ID)
+    progress["sheet_id"] = GOOGLE_SHEET_ID
+    print(f"[Sheets] Opened sheet: {ss.title}")
 
     # Ensure all tabs exist with headers
     existing = {ws.title: ws for ws in ss.worksheets()}
@@ -442,22 +441,12 @@ def init_sheets(progress):
         if tab not in existing:
             ws = ss.add_worksheet(title=tab, rows=2000, cols=len(SHEET_HEADERS))
             ws.append_row(SHEET_HEADERS)
-            sheets[tab] = ws
+            print(f"[Sheets] Created tab: {tab}")
         else:
-            sheets[tab] = existing[tab]
+            ws = existing[tab]
+        sheets[tab] = ws
 
     return gc, ss, sheets
-
-
-def _create_sheet(gc, progress):
-    ss = gc.create(
-        f"SAP Knowledge Base {datetime.now().strftime('%Y-%m-%d')}",
-        folder_id=DRIVE_FOLDER_ID,
-    )
-    progress["sheet_id"] = ss.id
-    save_progress(progress)
-    print(f"[Sheets] Created new sheet: {ss.title} (ID: {ss.id})")
-    return ss
 
 
 def _route_tab(ev_type: str, product: str) -> str:
