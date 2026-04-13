@@ -267,7 +267,7 @@ SAP_API_HUB_SEARCHES = [
 # ─── GEMINI ────────────────────────────────────────────────────────────────────
 
 genai.configure(api_key=GEMINI_API_KEY)
-_model = genai.GenerativeModel("gemini-1.5-flash")
+_model = genai.GenerativeModel("gemini-2.0-flash")
 
 
 def gemini_score(text: str, product: str = "SAP") -> float:
