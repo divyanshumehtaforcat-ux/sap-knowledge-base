@@ -1,0 +1,26 @@
+# SECRETS — never commit these
+service_account.json
+*.env
+.env
+secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+
+# Playwright browser binaries
+/playwright-browsers/
+
+# Claude internal
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

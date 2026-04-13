@@ -1,0 +1,25 @@
+# SAP Knowledge Tools — Laptop Dependencies
+# Run this ONCE in Command Prompt:
+#   pip install -r requirements_laptop.txt
+#   playwright install chromium
+#
+# These are for: manual_inject.py and notes_lookup.py
+# Do NOT use this file on GitHub Actions — use requirements.txt instead.
+
+# Web crawling + JavaScript page rendering (SAP Help Portal)
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.2.1
+playwright>=1.40.0
+
+# Google Sheets
+gspread==6.1.2
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+
+# AI summarisation — Gemini Flash (free tier)
+google-generativeai==0.7.2
+
+# Excel export
+openpyxl==3.1.2
